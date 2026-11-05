@@ -40,3 +40,7 @@ bb plugin install . --yes
 ```
 
 The installation path must be on the BB server machine. On a Windows host daemon, `NODE_PATH` may need to point to the installed npm directory for the build toolchain. The plugin uses experimental SDK APIs.
+
+## License
+
+MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
