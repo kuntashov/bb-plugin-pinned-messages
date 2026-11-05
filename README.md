@@ -14,11 +14,11 @@ Requires BB 0.48 or later and Plugin SDK 0.6.104 or later. The repository tracks
 
 ## Usage
 
-Use the pin action on a message; pressing it again unpins the message. The first pin's first two lines and a count appear above the composer; links in the preview are clickable. Open the preview or **Pins** in the thread header to see the list and the full message in a side panel. **Unpin** removes a pin. Select text in the full message and choose **Add to chat** to insert a quote and a message reference into the draft. Pins are ordered by when they were added and loaded in pages of 50.
+Use the pin action on a message; pressing it again unpins the entire message. To pin an excerpt, select text in the chat and choose **Pin message** in the selection menu. Each selection creates a separate pin, including multiple excerpts from the same message. The first pin's first two lines and a count appear above the composer; links in the preview are clickable. Open the preview or **Pins** in the thread header to see the list and the saved text in a side panel. **Unpin** removes the selected pin. Select text in a pin and choose **Add to chat** to insert a quote and a message reference into the draft. Pins are ordered by when they were added and loaded in pages of 50.
 
 Pins are snapshots: subsequent edits or streamed text do not change them. Unpin and pin again to refresh a snapshot. Attachments are not copied. Deleting a thread deletes its pins. SQLite stores pins on the server; realtime updates connected clients. Reading pins does not load the thread history.
 
-The message action also appears in the chat's text-selection menu and applies to the entire message. The action does not currently indicate whether a message is pinned. Embedded `ThreadChat` views do not expose the message action.
+The action does not currently indicate whether a message is pinned. Embedded `ThreadChat` views do not expose the message action.
 
 ## CLI
 
@@ -27,7 +27,7 @@ bb pinned-messages pin <thread-id> <message-seq>
 bb pinned-messages unpin <thread-id> <message-seq>
 ```
 
-Both commands are idempotent. The sequence is the message sequence used by `bb thread log --message`, not `sourceSeqEnd`. For a project-specific rule, inspect the first conversation message using `bb thread log <thread-id> --format json`, then retrieve it with `bb thread log <thread-id> --message <seq> --json`. Confirm `message.role` is `user` and `message.text` starts with the project's ticket identifier before calling the command with `message.messageSeq`. Define the ticket format in that project's instructions. This plugin does not automatically pin messages.
+Both commands are idempotent and affect whole-message pins only; excerpts are managed in the panel. The sequence is the message sequence used by `bb thread log --message`, not `sourceSeqEnd`. For a project-specific rule, inspect the first conversation message using `bb thread log <thread-id> --format json`, then retrieve it with `bb thread log <thread-id> --message <seq> --json`. Confirm `message.role` is `user` and `message.text` starts with the project's ticket identifier before calling the command with `message.messageSeq`. Define the ticket format in that project's instructions. This plugin does not automatically pin messages.
 
 ## Development
 

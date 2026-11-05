@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "vitest";
 import { createFakePluginHost, makeThreadResponse, experimental_scanPublicSdkOnly } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
 const hosts: ReturnType<typeof createFakePluginHost>[] = [];
 function setup() {
@@ -99,4 +100,46 @@ test("CLI unpin is idempotent, isolated by thread and rejects invalid sequences"
   expect(await host.call("overview", { threadId: "b" })).toMatchObject({ count: 1 });
   expect((await host.harness.behavior.runCli(["unpin", "b", "-1"])).exitCode).not.toBe(0);
   expect(await host.call("overview", { threadId: "b" })).toMatchObject({ count: 1 });
+});
+
+test("excerpts from one message remain independent of whole-message pins and each other", async () => {
+  const host = setup();
+  await host.call("pin", { threadId: "a", seq: 7 });
+  await host.call("pinExcerpt", { threadId: "a", seq: 7, text: "First excerpt" });
+  await host.call("pinExcerpt", { threadId: "a", seq: 7, text: "Second excerpt" });
+  const reloaded = await host.harness.lifecycle.reload(plugin);
+  hosts.push(reloaded);
+  const call = reloaded.harness.behavior.callRpc;
+  const list = await call("list", { threadId: "a", after: 0 }) as { pins: { id: number; kind: string }[] };
+  expect(list.pins.map(pin => pin.kind)).toEqual(["message", "excerpt", "excerpt"]);
+  const reads = reloaded.harness.inspection.sdk.callsTo("threads.message").length;
+  expect(await call("getById", { threadId: "a", id: list.pins[1]!.id })).toMatchObject({ text: "First excerpt", seq: 7 });
+  expect(await call("getById", { threadId: "a", id: list.pins[2]!.id })).toMatchObject({ text: "Second excerpt", seq: 7 });
+  expect(await call("getById", { threadId: "b", id: list.pins[1]!.id })).toBeNull();
+  expect(reloaded.harness.inspection.sdk.callsTo("threads.message")).toHaveLength(reads);
+  await call("unpin", { threadId: "a", seq: 7 });
+  await call("removeById", { threadId: "a", id: list.pins[1]!.id });
+  expect(await call("overview", { threadId: "a" })).toMatchObject({ count: 1, first: { id: list.pins[2]!.id } });
+  await expect(call("pinExcerpt", { threadId: "a", seq: 7, text: "  " })).rejects.toThrow();
+});
+
+test("migration preserves existing pin ids and snapshots", async () => {
+  const host = createFakePluginHost({ pluginId: "pinned-messages" });
+  hosts.push(host);
+  const oldPlugin = (bb: BbPluginApi) => {
+    const db = bb.storage.database();
+    bb.storage.migrate(db, [
+      `CREATE TABLE pins (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, threadId TEXT NOT NULL,
+      seq INTEGER NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL,
+      preview TEXT NOT NULL, pinnedAt INTEGER NOT NULL, UNIQUE(threadId, seq)
+    )`,
+      `CREATE INDEX pins_thread_order ON pins(threadId, id)`,
+    ]);
+    db.prepare("INSERT INTO pins (id, threadId, seq, role, text, preview, pinnedAt) VALUES (42, 'a', 7, 'user', 'saved text', 'saved text', 1)").run();
+  };
+  oldPlugin(host.bb);
+  const reloaded = await host.harness.lifecycle.reload(plugin);
+  hosts.push(reloaded);
+  expect(await reloaded.harness.behavior.callRpc("getById", { threadId: "a", id: 42 })).toMatchObject({ seq: 7, text: "saved text", kind: "message" });
 });

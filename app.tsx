@@ -68,7 +68,7 @@ function Pins({ threadId }: { threadId: string }) {
   const [pins, setPins] = useState<PinSummary[]>([]);
   const [next, setNext] = useState<number | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
-  const [detail, setDetail] = useState<{ seq: number; text: string } | null>(null);
+  const [detail, setDetail] = useState<{ id: number; seq: number; text: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
@@ -125,7 +125,7 @@ function Pins({ threadId }: { threadId: string }) {
     rpc.call("list", { threadId, after: 0 }).then(result => {
       if (request !== generation.current) return;
       setPins(result.pins); setNext(result.next); setError(null); setLoading(false); setRevision(value => value + 1);
-      setSelected(current => result.pins.some(pin => pin.seq === current) ? current : result.pins[0]?.seq ?? null);
+      setSelected(current => result.pins.some(pin => pin.id === current) ? current : result.pins[0]?.id ?? null);
     }, cause => { if (request === generation.current) { fail(cause); setLoading(false); } });
   }, [rpc, threadId, fail]);
   useEffect(() => { refresh(); return () => { generation.current++; }; }, [refresh]);
@@ -133,7 +133,7 @@ function Pins({ threadId }: { threadId: string }) {
   useEffect(() => {
     let active = true;
     setDetail(null);
-    if (selected !== null) rpc.call("get", { threadId, seq: selected }).then(result => {
+    if (selected !== null) rpc.call("getById", { threadId, id: selected }).then(result => {
       if (active) { setDetail(result); if (!result) refresh(); }
     }, cause => { if (active) fail(cause); });
     return () => { active = false; };
@@ -147,9 +147,9 @@ function Pins({ threadId }: { threadId: string }) {
       if (request === generation.current) { setPins(current => [...current, ...result.pins]); setNext(result.next); }
     } catch (cause) { fail(cause); } finally { setPending(false); }
   }
-  async function unpin(seq: number) {
+  async function unpin(id: number) {
     setPending(true);
-    try { await rpc.call("unpin", { threadId, seq }); refresh(); }
+    try { await rpc.call("removeById", { threadId, id }); refresh(); }
     catch (cause) { fail(cause); } finally { setPending(false); }
   }
   return <div className="flex h-full min-h-0 flex-col">
@@ -161,17 +161,17 @@ function Pins({ threadId }: { threadId: string }) {
     {loading && pins.length === 0 ? <p role="status" className="p-4 text-sm">Loading…</p> : pins.length === 0 ?
       <p className="p-4 text-sm text-muted-foreground">Use the pin icon on a message in the chat. You can pin any number of user and assistant messages.</p> : <>
       <nav aria-label="Pinned messages" className="max-h-[35%] shrink-0 overflow-y-auto border-b border-border p-2">
-        {pins.map((pin, index) => <button key={pin.seq} type="button" aria-current={selected === pin.seq ? "true" : undefined}
-          className={`mb-1 block w-full rounded-md border p-2 text-left text-sm hover:bg-muted ${selected === pin.seq ? "border-primary bg-muted" : "border-transparent"}`}
-          onClick={() => { setError(null); setSelection(null); setSelected(pin.seq); }}>
-          <span className="mb-1 block text-xs text-muted-foreground">{index + 1}. {pin.role === "user" ? "User" : "Assistant"}</span>
+        {pins.map((pin, index) => <button key={pin.id} type="button" aria-current={selected === pin.id ? "true" : undefined}
+          className={`mb-1 block w-full rounded-md border p-2 text-left text-sm hover:bg-muted ${selected === pin.id ? "border-primary bg-muted" : "border-transparent"}`}
+          onClick={() => { setError(null); setSelection(null); setSelected(pin.id); }}>
+          <span className="mb-1 block text-xs text-muted-foreground">{index + 1}. {pin.role === "user" ? "User" : "Assistant"}{pin.kind === "excerpt" ? " · Excerpt" : ""}</span>
           <span className="line-clamp-2 whitespace-pre-wrap break-words">{pin.preview || "Message without text"}</span>
         </button>)}
         {next !== null && <Button variant="outline" size="sm" disabled={pending} onClick={loadMore}>Show more</Button>}
       </nav>
       <div ref={contentRef} className="relative min-h-0 flex-1 overflow-y-auto p-4" key={selected} onScroll={() => setSelection(null)}>
-        {detail?.seq === selected && detail ? <article className="min-w-0 break-words">
-          <div className="mb-4 flex justify-end"><Button variant="outline" size="sm" disabled={pending} onClick={() => unpin(detail.seq)}><Icon name="PinOff" className="size-4" />Unpin</Button></div>
+        {detail?.id === selected && detail ? <article className="min-w-0 break-words">
+          <div className="mb-4 flex justify-end"><Button variant="outline" size="sm" disabled={pending} onClick={() => unpin(detail.id)}><Icon name="PinOff" className="size-4" />Unpin</Button></div>
           {selection && <div ref={popupRef} role="toolbar" aria-label="Selected text actions" className="absolute z-50 rounded-md border border-border bg-popover p-1 shadow-md" style={{ left: popupPosition?.left ?? 0, top: popupPosition?.top ?? 0, visibility: popupPosition ? "visible" : "hidden" }}>
           <Button variant="ghost" size="sm" className="h-7 px-2" onMouseDown={event => event.preventDefault()} onClick={() => {
             if (composer.scope.kind !== "thread" || composer.scope.threadId !== threadId) { report(new Error("Thread composer is unavailable")); return; }
@@ -190,18 +190,19 @@ function Pins({ threadId }: { threadId: string }) {
 export default definePluginApp(app => {
   app.slots.messageAction({
     id: "pin", title: "Pin message", icon: "Pin",
-    async run({ threadId, message }) {
+    async run({ threadId, message, selectedText }) {
       try {
         // Message actions have no hook scope; use the public plugin RPC endpoint.
-        const response = await fetch("/api/v1/plugins/pinned-messages/rpc/toggle", {
+        const isExcerpt = selectedText !== undefined;
+        const response = await fetch(`/api/v1/plugins/pinned-messages/rpc/${isExcerpt ? "pinExcerpt" : "toggle"}`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ threadId, seq: message.experimental_messageSeq }),
+          body: JSON.stringify({ threadId, seq: message.experimental_messageSeq, ...(isExcerpt ? { text: selectedText } : {}) }),
         });
         const body: unknown = await response.json();
-        if (!response.ok || typeof body !== "object" || body === null || !("ok" in body) || body.ok !== true || !("result" in body) || typeof body.result !== "boolean") {
+        if (!response.ok || typeof body !== "object" || body === null || !("ok" in body) || body.ok !== true || !("result" in body) || (isExcerpt ? body.result !== null : typeof body.result !== "boolean")) {
           throw new Error("Could not update pin");
         }
-        toast.success(body.result ? "Message pinned" : "Message unpinned");
+        toast.success(isExcerpt ? "Excerpt pinned" : body.result ? "Message pinned" : "Message unpinned");
       } catch (cause) { report(cause); }
     },
   });

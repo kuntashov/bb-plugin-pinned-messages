@@ -3,9 +3,10 @@ import { z } from "zod";
 
 const thread = z.object({ threadId: z.string().min(1) });
 const target = thread.extend({ seq: z.number().int().nonnegative() });
+const pinId = thread.extend({ id: z.number().int().positive() });
 const summary = z.object({
   id: z.number().int(), seq: z.number().int(), role: z.enum(["user", "assistant"]),
-  preview: z.string(), pinnedAt: z.number(),
+  preview: z.string(), pinnedAt: z.number(), kind: z.enum(["message", "excerpt"]),
 });
 export type PinSummary = z.infer<typeof summary>;
 export const rpcContract = defineRpcContract({
@@ -15,6 +16,9 @@ export const rpcContract = defineRpcContract({
     output: z.object({ pins: z.array(summary), next: z.number().nullable() }),
   },
   get: { input: target, output: summary.extend({ text: z.string() }).nullable() },
+  getById: { input: pinId, output: summary.extend({ text: z.string() }).nullable() },
+  removeById: { input: pinId, output: z.null() },
+  pinExcerpt: { input: target.extend({ text: z.string().refine(value => value.trim().length > 0) }), output: z.null() },
   pin: { input: target, output: z.null() },
   unpin: { input: target, output: z.null() },
   toggle: { input: target, output: z.boolean() },
@@ -29,20 +33,31 @@ export default function plugin(bb: BbPluginApi) {
       preview TEXT NOT NULL, pinnedAt INTEGER NOT NULL, UNIQUE(threadId, seq)
     )`,
     `CREATE INDEX pins_thread_order ON pins(threadId, id)`,
+    `CREATE TABLE pins_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, threadId TEXT NOT NULL,
+      seq INTEGER NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL,
+      preview TEXT NOT NULL, pinnedAt INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('message','excerpt'))
+    );
+    INSERT INTO pins_new (id, threadId, seq, role, text, preview, pinnedAt, kind)
+      SELECT id, threadId, seq, role, text, preview, pinnedAt, 'message' FROM pins;
+    DROP TABLE pins;
+    ALTER TABLE pins_new RENAME TO pins;
+    CREATE INDEX pins_thread_order ON pins(threadId, id);
+    CREATE UNIQUE INDEX pins_whole_message ON pins(threadId, seq) WHERE kind = 'message';`,
   ]);
-  const fields = "id, seq, role, preview, pinnedAt";
+  const fields = "id, seq, role, preview, pinnedAt, kind";
   const changed = (threadId: string) => bb.realtime.publish("pins-changed", { threadId });
   const pin = async ({ threadId, seq }: { threadId: string; seq: number }) => {
-    if (db.prepare("SELECT 1 FROM pins WHERE threadId = ? AND seq = ?").get(threadId, seq)) return null;
+    if (db.prepare("SELECT 1 FROM pins WHERE threadId = ? AND seq = ? AND kind = 'message'").get(threadId, seq)) return null;
     const { message } = await bb.sdk.threads.message({ threadId, seq, before: 0, after: 0 });
-    db.prepare(`INSERT INTO pins (threadId, seq, role, text, preview, pinnedAt)
-      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(threadId, seq) DO NOTHING`)
+    db.prepare(`INSERT INTO pins (threadId, seq, role, text, preview, pinnedAt, kind)
+      VALUES (?, ?, ?, ?, ?, ?, 'message') ON CONFLICT DO NOTHING`)
       .run(threadId, seq, message.role, message.text, message.text.trim().split(/\r?\n/).slice(0, 2).join("\n"), Date.now());
     changed(threadId);
     return null;
   };
   const unpin = ({ threadId, seq }: { threadId: string; seq: number }) => {
-    db.prepare("DELETE FROM pins WHERE threadId = ? AND seq = ?").run(threadId, seq);
+    db.prepare("DELETE FROM pins WHERE threadId = ? AND seq = ? AND kind = 'message'").run(threadId, seq);
     changed(threadId);
     return null;
   };
@@ -72,10 +87,19 @@ export default function plugin(bb: BbPluginApi) {
       const pins = rows.slice(0, 50);
       return { pins, next: rows.length > 50 ? pins[pins.length - 1]!.id : null };
     },
-    get: ({ threadId, seq }) => (db.prepare(`SELECT ${fields}, text FROM pins WHERE threadId = ? AND seq = ?`).get(threadId, seq) as (PinSummary & { text: string }) | undefined) ?? null,
+    get: ({ threadId, seq }) => (db.prepare(`SELECT ${fields}, text FROM pins WHERE threadId = ? AND seq = ? AND kind = 'message'`).get(threadId, seq) as (PinSummary & { text: string }) | undefined) ?? null,
+    getById: ({ threadId, id }) => (db.prepare(`SELECT ${fields}, text FROM pins WHERE threadId = ? AND id = ?`).get(threadId, id) as (PinSummary & { text: string }) | undefined) ?? null,
+    removeById: ({ threadId, id }) => { db.prepare('DELETE FROM pins WHERE threadId = ? AND id = ?').run(threadId, id); changed(threadId); return null; },
+    pinExcerpt: async ({ threadId, seq, text }) => {
+      const { message } = await bb.sdk.threads.message({ threadId, seq, before: 0, after: 0 });
+      db.prepare(`INSERT INTO pins (threadId, seq, role, text, preview, pinnedAt, kind) VALUES (?, ?, ?, ?, ?, ?, 'excerpt')`)
+        .run(threadId, seq, message.role, text, text.trim().split(/\r?\n/).slice(0, 2).join('\n'), Date.now());
+      changed(threadId);
+      return null;
+    },
     pin,
     toggle: async ({ threadId, seq }) => {
-      const deleted = db.prepare("DELETE FROM pins WHERE threadId = ? AND seq = ?").run(threadId, seq);
+      const deleted = db.prepare("DELETE FROM pins WHERE threadId = ? AND seq = ? AND kind = 'message'").run(threadId, seq);
       if (deleted.changes) { changed(threadId); return false; }
       await pin({ threadId, seq });
       return true;

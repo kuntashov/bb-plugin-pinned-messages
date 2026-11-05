@@ -4,8 +4,8 @@ import { cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import app, { PinBanner, PinsPanel } from "./app";
 
-const first = { id: 1, seq: 7, role: "user", preview: "Первое сообщение", pinnedAt: 1 };
-const second = { id: 2, seq: 9, role: "assistant", preview: "Второе сообщение", pinnedAt: 2 };
+const first = { id: 1, seq: 7, role: "user", kind: "message" as const, preview: "Первое сообщение", pinnedAt: 1 };
+const second = { id: 2, seq: 9, role: "assistant", kind: "message" as const, preview: "Второе сообщение", pinnedAt: 2 };
 afterEach(cleanup);
 
 test("registers the message action, header, panel and preview", async () => {
@@ -15,18 +15,45 @@ test("registers the message action, header, panel and preview", async () => {
   expect(registrations.tabs.map(tab => tab.id)).toEqual(["pins"]);
 });
 
+test("selection action pins the selected text; row action toggles the whole message", async () => {
+  const registrations = await loadPluginApp(app);
+  const action = registrations.messageActions[0]!;
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: null }), { status: 200 })).mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: false }), { status: 200 }));
+  try {
+    const context = { threadId: "a", message: { experimental_messageSeq: 7 }, selectedText: "Chosen text" } as Parameters<typeof action.run>[0];
+    await action.run(context);
+    await action.run({ ...context, selectedText: undefined });
+    expect(fetchMock.mock.calls[0]![0]).toContain("/rpc/pinExcerpt");
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({ threadId: "a", seq: 7, text: "Chosen text" });
+    expect(fetchMock.mock.calls[1]![0]).toContain("/rpc/toggle");
+  } finally { fetchMock.mockRestore(); }
+});
+
 test("selects saved messages in the panel without navigating the transcript", async () => {
-  const get = vi.fn(({ seq }) => ({ ...(seq === 7 ? first : second), text: `Полный текст ${seq}` }));
-  const unpin = vi.fn(() => null);
+  const getById = vi.fn(({ id }) => ({ ...(id === 1 ? first : second), text: `Полный текст ${id === 1 ? 7 : 9}` }));
+  const removeById = vi.fn(() => null);
   const view = renderSlot({ component: PinsPanel }, { threadId: "a" }, {
-    rpc: { list: () => ({ pins: [first, second], next: null }), get, unpin },
+    rpc: { list: () => ({ pins: [first, second], next: null }), getById, removeById },
   });
   await view.findByText("Полный текст 7");
   fireEvent.click(view.getByText("Второе сообщение"));
   await view.findByText("Полный текст 9");
   fireEvent.click(view.getByText("Unpin"));
-  await waitFor(() => expect(unpin).toHaveBeenCalledWith({ threadId: "a", seq: 9 }));
+  await waitFor(() => expect(removeById).toHaveBeenCalledWith({ threadId: "a", id: 2 }));
   expect(view.inspection.navigateCalls).toEqual([]);
+});
+
+test("shows and removes separate excerpts of the same message", async () => {
+  const excerpts = [{ ...first, kind: "excerpt" as const, preview: "First excerpt" }, { ...first, id: 2, kind: "excerpt" as const, preview: "Second excerpt" }];
+  const removeById = vi.fn(() => null);
+  const view = renderSlot({ component: PinsPanel }, { threadId: "a" }, {
+    rpc: { list: () => ({ pins: excerpts, next: null }), getById: (input: unknown) => { const { id } = input as { id: number }; return { ...excerpts[id - 1], text: `Full excerpt ${id}` }; }, removeById },
+  });
+  await view.findByText("Full excerpt 1");
+  fireEvent.click(view.getByText("Second excerpt"));
+  await view.findByText("Full excerpt 2");
+  fireEvent.click(view.getByText("Unpin"));
+  await waitFor(() => expect(removeById).toHaveBeenCalledWith({ threadId: "a", id: 2 }));
 });
 
 test("passes preview links to the host Markdown renderer; open preserves the chat", async () => {
@@ -45,7 +72,7 @@ test("passes preview links to the host Markdown renderer; open preserves the cha
 // The panel uses the thread-bound composer; selection must never submit a message.
 test("adds a selected excerpt to the thread draft", async () => {
   const view = renderSlot({ component: PinsPanel }, { threadId: "a" }, {
-    rpc: { list: () => ({ pins: [first], next: null }), get: () => ({ ...first, text: "Selected excerpt" }) },
+    rpc: { list: () => ({ pins: [first], next: null }), getById: () => ({ ...first, text: "Selected excerpt" }) },
   });
   await view.behavior.setComposerScope({ kind: "thread", threadId: "a" });
   const text = await view.findByText("Selected excerpt");
@@ -64,7 +91,7 @@ test("adds a selected excerpt to the thread draft", async () => {
 
 test("dismisses the selection toolbar on scroll and Escape", async () => {
   const view = renderSlot({ component: PinsPanel }, { threadId: "a" }, {
-    rpc: { list: () => ({ pins: [first], next: null }), get: () => ({ ...first, text: "Selected excerpt" }) },
+    rpc: { list: () => ({ pins: [first], next: null }), getById: () => ({ ...first, text: "Selected excerpt" }) },
   });
   const text = await view.findByText("Selected excerpt");
   const range = document.createRange();
@@ -84,7 +111,7 @@ test("dismisses the selection toolbar on scroll and Escape", async () => {
 
 test("positions the toolbar beside the end of a multiline selection", async () => {
   const view = renderSlot({ component: PinsPanel }, { threadId: "a" }, {
-    rpc: { list: () => ({ pins: [first], next: null }), get: () => ({ ...first, text: "Selected excerpt" }) },
+    rpc: { list: () => ({ pins: [first], next: null }), getById: () => ({ ...first, text: "Selected excerpt" }) },
   });
   const text = await view.findByText("Selected excerpt");
   const container = text.closest(".overflow-y-auto") as HTMLElement;
